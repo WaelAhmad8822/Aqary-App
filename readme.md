@@ -69,7 +69,9 @@ This repo is configured for Vercel with:
 - Static frontend output from `artifacts/aqary/dist/public`
 - Serverless API entry at `api/[...all].ts` (Express app)
 
-In the Vercel project **Settings → General → Root Directory**, use the **repository root** (`.`). The root `vercel.json` runs **`pnpm -C artifacts/aqary run build`**, which uses the `build` script inside `artifacts/aqary/package.json` (no `build:web` script required on Vercel).
+In the Vercel project **Settings → General → Root Directory**, use the **repository root** (`.`). The root `vercel.json` runs **`pnpm -C artifacts/aqary run build:web`**. The `build:web` script exists both on the workspace root and in `artifacts/aqary/package.json`, so **`pnpm run build:web`** works whether Vercel’s **Root Directory** is the repo root or `artifacts/aqary`.
+
+If you still see **`ERR_PNPM_NO_SCRIPT` for `build:web`**, open **Project → Settings → General → Build & Development Settings** and remove any **custom Build Command** that overrides `vercel.json` (leave it empty to use the file), or set **Root Directory** to the repository root.
 
 If you must set Root Directory to **`artifacts/aqary`**, override in the Vercel UI: **Build Command** `pnpm run build`, **Output Directory** `dist/public`, and keep **`api/`** at the repo root by using a monorepo setup or moving the API — simplest is to keep Root Directory at the repo root.
 
@@ -80,7 +82,7 @@ If you see **“No entrypoint found in output directory”**, it usually means V
 If the build step fails, open the full log on Vercel. Common causes:
 
 - **Install failed** (before build): run `pnpm install` locally with the same lockfile; if `minimumReleaseAge` in `pnpm-workspace.yaml` blocks a new package, you may need to wait or adjust the allowlist.
-- **`ERR_PNPM_NO_SCRIPT`**: do not rely on a root-only script name; this project’s Vercel build calls `pnpm -C artifacts/aqary run build` from the repo root.
+- **`ERR_PNPM_NO_SCRIPT` for `build:web`**: clear the dashboard **Build Command** override, or ensure `build:web` exists in the `package.json` for your chosen Root Directory (this repo defines it in both places).
 
 Set these Environment Variables in Vercel Project Settings:
 
