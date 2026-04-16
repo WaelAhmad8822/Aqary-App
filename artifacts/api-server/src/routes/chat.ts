@@ -7,12 +7,11 @@ import {
   ensureMongoConnection,
   FeedbackModel,
   PropertyModel,
+  ConversationStateModel,
   nextSequence,
 } from "../lib/mongo";
 
 const router: IRouter = Router();
-
-const COMPLAINT_KEYWORDS = ["مشكلة", "شكوى", "لا يوجد", "غير متوفر", "خطأ", "سيء", "مشاكل"];
 
 interface ConversationSlots {
   role: "buyer" | "seller" | null;
@@ -23,97 +22,268 @@ interface ConversationSlots {
   features: string[];
 }
 
-const LOCATION_KEYWORDS: Record<string, string> = {
-  "القاهرة": "القاهرة", "الجيزة": "الجيزة", "الإسكندرية": "الإسكندرية",
-  "المنصورة": "المنصورة", "طنطا": "طنطا", "أسيوط": "أسيوط",
-  "الساحل الشمالي": "الساحل الشمالي", "العين السخنة": "العين السخنة",
-  "6 أكتوبر": "6 أكتوبر", "التجمع الخامس": "التجمع الخامس",
-  "المعادي": "المعادي", "الشيخ زايد": "الشيخ زايد",
-  "مصر الجديدة": "القاهرة", "مدينة نصر": "القاهرة",
+interface MatchedPropertyResult {
+  id: number;
+  title: string;
+  price: number;
+  location: string;
+  propertyType: string;
+  propertyUrl: string;
+  matchReasons: string[];
+}
+
+type PropertyCandidate = {
+  id: number;
+  title: string;
+  price: number;
+  location: string;
+  propertyType: string;
+  features: string[];
 };
 
-const TYPE_KEYWORDS: Record<string, string> = {
-  "شقة": "apartment", "شقه": "apartment", "apartment": "apartment",
-  "فيلا": "villa", "فيلة": "villa", "villa": "villa",
-  "تجاري": "commercial", "محل": "commercial", "مكتب": "commercial",
-  "أرض": "land", "ارض": "land",
-};
+interface ConversationAnalysis {
+  role: ConversationSlots["role"];
+  payment: ConversationSlots["payment"];
+  budget: number | null;
+  location: string | null;
+  propertyType: ConversationSlots["propertyType"];
+  features: string[];
+  isComplaint: boolean;
+  complaintSummary: string | null;
+  missingField: "role" | "payment" | "budget" | "location" | "propertyType" | "features" | null;
+  nextQuestion: string | null;
+  userSummary: string;
+  shouldSearchProperties: boolean;
+}
 
-function extractSlots(conversationHistory: Array<{ role: string; content: string }>, currentMessage: string): ConversationSlots {
-  const allText = conversationHistory.map(h => h.content).join(" ") + " " + currentMessage;
-  const userText = conversationHistory.filter(h => h.role === "user").map(h => h.content).join(" ") + " " + currentMessage;
+function stripJsonFromModelText(text: string): string {
+  const trimmed = text.trim();
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch?.[1]) return fenceMatch[1].trim();
+  return trimmed;
+}
 
-  const slots: ConversationSlots = {
-    role: null,
-    payment: null,
-    budget: null,
-    location: null,
-    propertyType: null,
-    features: [],
+function safeParseExtractedSlots(raw: unknown): Partial<ConversationSlots> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+
+  const out: Partial<ConversationSlots> = {};
+
+  const role = obj.role;
+  if (role === "buyer" || role === "seller" || role === null) out.role = role;
+
+  const payment = obj.payment;
+  if (payment === "cash" || payment === "installment" || payment === null) out.payment = payment;
+
+  const budget = obj.budget;
+  if (budget === null) out.budget = null;
+  else if (typeof budget === "number" && Number.isFinite(budget) && budget > 0) out.budget = Math.round(budget);
+
+  const location = obj.location;
+  if (location === null) out.location = null;
+  else if (typeof location === "string") out.location = location.trim() || null;
+
+  const propertyType = obj.propertyType;
+  if (propertyType === null) out.propertyType = null;
+  else if (typeof propertyType === "string") out.propertyType = propertyType.trim() || null;
+
+  const features = obj.features;
+  if (Array.isArray(features)) {
+    out.features = features.filter((x) => typeof x === "string").map((x) => x.trim()).filter(Boolean);
+  }
+
+  return out;
+}
+
+async function extractSlotsWithModel(
+  conversationHistory: Array<{ role: string; content: string }>,
+  userMessage: string,
+): Promise<Partial<ConversationSlots> | null> {
+  const JSON_EXTRACT_PROMPT = `أنت محلّل نوايا/كيانات لمساعد عقاري.
+أعد "JSON فقط" بدون أي شرح أو نص إضافي.
+
+استخرج الحقول التالية من المحادثة إن وُجدت:
+- role: "buyer" | "seller" | null
+- payment: "cash" | "installment" | null
+- budget: number | null   (بالجنيه المصري)
+- location: string | null (مثال: "القاهرة", "الجيزة", "العين السخنة")
+- propertyType: "apartment" | "villa" | "commercial" | "land" | null
+- features: string[]      (مثل: "مسبح", "حديقة", "شرفة", "أمن", "موقف سيارات")
+
+قواعد:
+- إذا لم تذكر المعلومة، اجعلها null (أو [] للميزات).
+- لا تخمّن أرقام غير مذكورة.
+- اكتب JSON صالحاً تماماً.`;
+
+  const raw = await callOllama(JSON_EXTRACT_PROMPT, conversationHistory, userMessage);
+  const jsonText = stripJsonFromModelText(raw);
+  try {
+    const parsed = JSON.parse(jsonText) as unknown;
+    return safeParseExtractedSlots(parsed);
+  } catch (error: unknown) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logger.warn({ errMsg, sample: jsonText.slice(0, 200) }, "Failed to parse extracted slots JSON");
+    return null;
+  }
+}
+
+function parseConversationAnalysis(raw: string): ConversationAnalysis | null {
+  try {
+    const parsed = JSON.parse(stripJsonFromModelText(raw)) as Record<string, unknown>;
+    const modelSlots = safeParseExtractedSlots(parsed) ?? {};
+    const missing = parsed.missingField;
+    const missingField = (missing === "role" || missing === "payment" || missing === "budget" || missing === "location" || missing === "propertyType" || missing === "features")
+      ? missing
+      : null;
+    return {
+      role: modelSlots.role ?? null,
+      payment: modelSlots.payment ?? null,
+      budget: modelSlots.budget ?? null,
+      location: modelSlots.location ?? null,
+      propertyType: modelSlots.propertyType ?? null,
+      features: modelSlots.features ?? [],
+      isComplaint: Boolean(parsed.isComplaint),
+      complaintSummary: typeof parsed.complaintSummary === "string" ? parsed.complaintSummary : null,
+      missingField,
+      nextQuestion: typeof parsed.nextQuestion === "string" ? parsed.nextQuestion : null,
+      userSummary: typeof parsed.userSummary === "string" ? parsed.userSummary : "",
+      shouldSearchProperties: Boolean(parsed.shouldSearchProperties),
+    };
+  } catch (error: unknown) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logger.warn({ errMsg, sample: raw.slice(0, 240) }, "Failed to parse conversation analysis JSON");
+    return null;
+  }
+}
+
+
+function mergeSlots(base: ConversationSlots, incoming: Partial<ConversationSlots> | null | undefined): ConversationSlots {
+  if (!incoming) return base;
+  return {
+    role: incoming.role ?? base.role,
+    payment: incoming.payment ?? base.payment,
+    budget: incoming.budget ?? base.budget,
+    location: incoming.location ?? base.location,
+    propertyType: incoming.propertyType ?? base.propertyType,
+    features: (incoming.features && incoming.features.length > 0) ? incoming.features : base.features,
   };
-
-  if (userText.includes("مشتري") || userText.includes("أشتري") || userText.includes("شراء") || userText.includes("بحث")) {
-    slots.role = "buyer";
-  } else if (userText.includes("بائع") || userText.includes("أبيع") || userText.includes("بيع")) {
-    slots.role = "seller";
-  }
-
-  if (userText.includes("كاش") || userText.includes("نقد") || userText.includes("نقدا") || userText.includes("نقداً")) {
-    slots.payment = "cash";
-  } else if (userText.includes("تقسيط") || userText.includes("تمويل")) {
-    slots.payment = "installment";
-  }
-
-  const budgetMatch = userText.match(/(\d[\d,]*)\s*(جنيه|ج\.م|مليون|ألف)?/);
-  if (budgetMatch) {
-    let budget = parseInt(budgetMatch[1].replace(/,/g, ""), 10);
-    if (allText.includes("مليون") || budgetMatch[2] === "مليون") budget *= 1000000;
-    else if (allText.includes("ألف") || budgetMatch[2] === "ألف") budget *= 1000;
-    if (budget < 1000) budget *= 1000000;
-    slots.budget = budget;
-  }
-
-  for (const [keyword, loc] of Object.entries(LOCATION_KEYWORDS)) {
-    if (userText.includes(keyword)) {
-      slots.location = loc;
-      break;
-    }
-  }
-
-  for (const [keyword, type] of Object.entries(TYPE_KEYWORDS)) {
-    if (userText.includes(keyword)) {
-      slots.propertyType = type;
-      break;
-    }
-  }
-
-  const featureKeywords = ["مسبح", "حديقة", "إطلالة بحرية", "موقف سيارات", "مصعد", "أمن", "تكييف مركزي", "شرفة", "جراج", "حمام سباحة"];
-  for (const feature of featureKeywords) {
-    if (userText.includes(feature)) {
-      slots.features.push(feature === "حمام سباحة" ? "مسبح" : feature === "جراج" ? "موقف سيارات" : feature);
-    }
-  }
-
-  return slots;
 }
 
-function getNextQuestion(slots: ConversationSlots): string | null {
-  if (!slots.role) return null;
-  if (slots.role === "buyer") {
-    if (!slots.payment) return "payment";
-    if (slots.payment === "installment") return "installment_redirect";
-    if (!slots.budget) return "budget";
-    if (!slots.location) return "location";
-    if (!slots.propertyType) return "type";
-    return "ready";
-  }
-  return null;
+async function analyzeConversationWithModel(
+  conversationHistory: Array<{ role: string; content: string }>,
+  userMessage: string,
+): Promise<ConversationAnalysis | null> {
+  const analysisPrompt = `أنت محلل محادثة لمساعد عقاري.
+أرجع JSON فقط بالشكل التالي:
+{
+  "role": "buyer" | "seller" | null,
+  "payment": "cash" | "installment" | null,
+  "budget": number | null,
+  "location": string | null,
+  "propertyType": "apartment" | "villa" | "commercial" | "land" | null,
+  "features": string[],
+  "isComplaint": boolean,
+  "complaintSummary": string | null,
+  "missingField": "role" | "payment" | "budget" | "location" | "propertyType" | "features" | null,
+  "nextQuestion": string | null,
+  "userSummary": string,
+  "shouldSearchProperties": boolean
 }
 
-const OLLAMA_BASE_URL = "https://remission-copilot-why.ngrok-free.dev";
+قواعد:
+- استخدم فقط المعلومات المذكورة من المستخدم.
+- اسأل سؤالاً واحداً فقط في nextQuestion عند الحاجة.
+- إذا المستخدم مشتكي/غاضب/يبلّغ مشكلة فاجعل isComplaint=true.
+- shouldSearchProperties=true فقط عندما بيانات المشتري كافية لاقتراح نتائج جيدة.`;
+  const raw = await callOllama(analysisPrompt, conversationHistory, userMessage);
+  return parseConversationAnalysis(raw);
+}
+
+async function buildFinalReplyWithModel(
+  analysis: ConversationAnalysis,
+  matchedProperties: MatchedPropertyResult[],
+  conversationHistory: Array<{ role: string; content: string }>,
+  userMessage: string,
+): Promise<string> {
+  const responsePrompt = `أنت مساعد عقاري عربي.
+اعطِ رداً مهنيًا ومختصراً (<=150 كلمة).
+قواعد:
+- سؤال واحد فقط في كل رسالة عند الحاجة.
+- إذا isComplaint=true: اعتذر باحترام واذكر أن الملاحظة تم تسجيلها.
+- إذا هناك عقارات مطابقة: قدّم ملخصاً قصيراً وتوجيه واضح للخطوة التالية.
+- اعتمد على userSummary والمطابقات القادمة.
+لا تُرجع JSON.`;
+
+  const payload = {
+    analysis,
+    matches: matchedProperties.map((p) => ({
+      id: p.id,
+      title: p.title,
+      price: p.price,
+      location: p.location,
+      propertyType: p.propertyType,
+      propertyUrl: p.propertyUrl,
+      reasons: p.matchReasons,
+    })),
+  };
+  return callOllama(responsePrompt, conversationHistory, `${userMessage}\n\nDATA:\n${JSON.stringify(payload)}`);
+}
+
+function parseRankedIds(raw: string): number[] {
+  const jsonText = stripJsonFromModelText(raw);
+  const parsed = JSON.parse(jsonText) as unknown;
+  if (!parsed || typeof parsed !== "object") return [];
+  const ranked = (parsed as { rankedIds?: unknown }).rankedIds;
+  if (!Array.isArray(ranked)) return [];
+  return ranked.filter((id) => typeof id === "number" && Number.isFinite(id)).map((id) => Math.round(id));
+}
+
+async function rankPropertiesWithModel(
+  slots: ConversationSlots,
+  candidates: PropertyCandidate[],
+  conversationHistory: Array<{ role: string; content: string }>,
+  userMessage: string,
+): Promise<number[] | null> {
+  if (candidates.length === 0) return [];
+
+  const rankingPrompt = `أنت نظام ترتيب عقارات.
+أعد JSON فقط بالشكل التالي:
+{"rankedIds":[...]}
+
+رتّب معرفات العقارات من الأفضل للأسوأ بناءً على تفضيلات المستخدم.
+معايير الترتيب: التوافق مع الميزانية، الموقع، نوع العقار، والمواصفات.
+لا تضف أي نص خارج JSON.`;
+
+  const candidatesJson = JSON.stringify(candidates, null, 2);
+  const slotsJson = JSON.stringify(slots);
+  const rankingMessage = `تفضيلات المستخدم (JSON): ${slotsJson}
+
+العقارات المرشحة (JSON):
+${candidatesJson}
+
+رسالة المستخدم الأخيرة:
+${userMessage}`;
+
+  const raw = await callOllama(rankingPrompt, conversationHistory, rankingMessage);
+  try {
+    const rankedIds = parseRankedIds(raw);
+    return rankedIds.length ? rankedIds : null;
+  } catch (error: unknown) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logger.warn({ errMsg, sample: raw.slice(0, 200) }, "Failed to parse property ranking JSON");
+    return null;
+  }
+}
+
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || process.env.LLM_BASE_URL || "";
 
 async function callOllama(systemPrompt: string, conversationHistory: Array<{ role: string; content: string }>, userMessage: string): Promise<string> {
   try {
+    if (!OLLAMA_BASE_URL) {
+      logger.error("OLLAMA_BASE_URL (or LLM_BASE_URL) is not configured");
+      return "عذراً، خدمة الدردشة غير مهيأة حالياً. يرجى المحاولة لاحقاً.";
+    }
+
     const messages = [
       { role: "system", content: systemPrompt },
       ...conversationHistory.map(msg => ({
@@ -127,7 +297,7 @@ async function callOllama(systemPrompt: string, conversationHistory: Array<{ rol
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "ngrok-skip-browser-warning": "true",
+        ...(OLLAMA_BASE_URL.includes("ngrok") ? { "ngrok-skip-browser-warning": "true" } : {}),
       },
       body: JSON.stringify({
         model: "llama3",
@@ -151,35 +321,6 @@ async function callOllama(systemPrompt: string, conversationHistory: Array<{ rol
   }
 }
 
-const SYSTEM_PROMPT = `أنت مساعد عقاري ذكي اسمك "عقاري". تعمل ضمن منصة عقارية مصرية.
-
-قواعد صارمة يجب اتباعها:
-1. اسأل سؤالاً واحداً فقط في كل رسالة. لا تسأل أكثر من سؤال واحد أبداً.
-2. استخدم اللغة العربية الفصحى الحديثة فقط.
-3. كن محترفاً ودافئاً وجديراً بالثقة.
-4. الحد الأقصى 150 كلمة لكل رد.
-
-تدفق المحادثة:
-- ابدأ بالسؤال: "أهلاً بك! هل أنت (مشتري) أم (بائع)؟"
-
-إذا كان المستخدم مشتري:
-1. اسأل عن طريقة الدفع: "كيف تفضل الدفع؟ نقداً (كاش) أم تمويلاً (تقسيط)؟"
-2. إذا اختار التقسيط: أجب "لكن حالياً خدمة التقسيط والتمويل العقاري غير متاحة مباشرة في النظام. هل تود الاستمرار بخيار الدفع الكاش؟"
-3. إذا اختار الكاش أو وافق على الكاش:
-   - اسأل عن الميزانية
-   - ثم الموقع المفضل
-   - ثم نوع العقار (شقة، فيلا، تجاري)
-   - ثم المواصفات المطلوبة
-4. بعد جمع البيانات، سأعرض العقارات المناسبة مع شرح سبب التوافق.
-
-إذا كان المستخدم بائع:
-1. اسأل عن نوع العقار
-2. اسأل عن الهدف (سرعة البيع أم أفضل سعر)
-3. اسأل عن معلومات التواصل
-4. اسأل عن تجهيز صفحة العرض
-
-إذا ذكر المستخدم مشكلة أو شكوى، اعتذر وأخبره أنه تم تسجيل ملاحظته.`;
-
 router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
   await ensureMongoConnection();
   const parsed = SendChatMessageBody.safeParse(req.body);
@@ -190,8 +331,15 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
 
   const { message, conversationHistory = [] } = parsed.data;
   const userId = req.user!.userId;
+  const sessionHeader = req.headers["x-chat-session-id"];
+  const sessionId = typeof sessionHeader === "string" && sessionHeader.trim() ? sessionHeader.trim().slice(0, 120) : "default";
 
-  const isComplaint = COMPLAINT_KEYWORDS.some(kw => message.includes(kw));
+  const historyItems = (conversationHistory || []).map((h: { role: string; content: string }) => ({
+    role: h.role as string,
+    content: h.content as string,
+  }));
+  const analysis = await analyzeConversationWithModel(historyItems, message);
+  const isComplaint = analysis?.isComplaint ?? false;
   let feedbackCreated = false;
 
   if (isComplaint) {
@@ -199,35 +347,66 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
       id: await nextSequence("feedback"),
       userId,
       message,
-      criteria: "شكوى من المحادثة",
+      criteria: analysis?.complaintSummary || "شكوى من المحادثة",
     });
     feedbackCreated = true;
   }
 
-  const historyItems = (conversationHistory || []).map((h: { role: string; content: string }) => ({
-    role: h.role as string,
-    content: h.content as string,
-  }));
+  const stateDoc = await ConversationStateModel.findOne({ userId, sessionId }).lean();
+  const persistedSlots: ConversationSlots = {
+    role: (stateDoc?.slots?.role as ConversationSlots["role"]) ?? null,
+    payment: (stateDoc?.slots?.payment as ConversationSlots["payment"]) ?? null,
+    budget: stateDoc?.slots?.budget ?? null,
+    location: stateDoc?.slots?.location ?? null,
+    propertyType: stateDoc?.slots?.propertyType ?? null,
+    features: Array.isArray(stateDoc?.slots?.features) ? stateDoc!.slots.features : [],
+  };
 
-  const slots = extractSlots(historyItems, message);
-  const nextQ = getNextQuestion(slots);
+  // Primary source is model analysis; fallback is lightweight structured extraction.
+  const modelSlots = analysis ? {
+    role: analysis.role,
+    payment: analysis.payment,
+    budget: analysis.budget,
+    location: analysis.location,
+    propertyType: analysis.propertyType,
+    features: analysis.features,
+  } : await extractSlotsWithModel(historyItems, message);
+  const transientSlots: ConversationSlots = {
+    role: modelSlots?.role ?? null,
+    payment: modelSlots?.payment ?? null,
+    budget: modelSlots?.budget ?? null,
+    location: modelSlots?.location ?? null,
+    propertyType: modelSlots?.propertyType ?? null,
+    features: (modelSlots?.features && modelSlots.features.length > 0) ? modelSlots.features : [],
+  };
+  const slots = mergeSlots(persistedSlots, transientSlots);
 
-  const reply = await callOllama(SYSTEM_PROMPT, historyItems, message);
+  await ConversationStateModel.findOneAndUpdate(
+    { userId, sessionId },
+    {
+      $set: {
+        userId,
+        sessionId,
+        slots,
+        lastUserMessage: message,
+        updatedAt: new Date(),
+      },
+      $setOnInsert: {
+        id: await nextSequence("conversationState"),
+        createdAt: new Date(),
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  ).lean();
 
-  interface MatchedPropertyResult {
-    id: number;
-    title: string;
-    price: number;
-    location: string;
-    propertyType: string;
-    matchReasons: string[];
-  }
+  const nextQ = analysis?.nextQuestion ?? null;
 
   let matchedProperties: MatchedPropertyResult[] = [];
 
   const isBuyerReady = slots.role === "buyer" && slots.budget && slots.propertyType;
+  const shouldSearch = analysis?.shouldSearchProperties ?? Boolean(isBuyerReady);
 
-  if (isBuyerReady && (nextQ === "ready" || slots.location)) {
+  if (shouldSearch && isBuyerReady && (nextQ === null || slots.location)) {
     const query: Record<string, unknown> = { status: "approved" };
     if (slots.budget) {
       query.price = { $lte: Math.round(slots.budget * 1.15) };
@@ -255,7 +434,16 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
       preferredFeatures: slots.features,
     };
 
-    matchedProperties = props.map(p => {
+    const candidates: PropertyCandidate[] = props.map((p) => ({
+      id: p.id,
+      title: p.title,
+      price: p.price,
+      location: p.location,
+      propertyType: p.propertyType,
+      features: p.features,
+    }));
+
+    matchedProperties = candidates.map(p => {
       const reasons = getMatchReasons(
         { price: p.price, location: p.location, propertyType: p.propertyType, features: p.features },
         userPrefs
@@ -266,13 +454,48 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
         price: p.price,
         location: p.location,
         propertyType: p.propertyType,
+        propertyUrl: `/property/${p.id}`,
         matchReasons: reasons,
       };
     });
 
-    matchedProperties.sort((a, b) => b.matchReasons.length - a.matchReasons.length);
+    const rankedIds = await rankPropertiesWithModel(slots, candidates, historyItems, message);
+    if (rankedIds && rankedIds.length > 0) {
+      const rankMap = new Map<number, number>();
+      rankedIds.forEach((id, idx) => rankMap.set(id, idx));
+      matchedProperties.sort((a, b) => {
+        const ra = rankMap.get(a.id);
+        const rb = rankMap.get(b.id);
+        if (ra != null && rb != null) return ra - rb;
+        if (ra != null) return -1;
+        if (rb != null) return 1;
+        return b.matchReasons.length - a.matchReasons.length;
+      });
+    } else {
+      matchedProperties.sort((a, b) => b.matchReasons.length - a.matchReasons.length);
+    }
     matchedProperties = matchedProperties.slice(0, 3);
   }
+
+  const reply = await buildFinalReplyWithModel(
+    analysis ?? {
+      role: slots.role,
+      payment: slots.payment,
+      budget: slots.budget,
+      location: slots.location,
+      propertyType: slots.propertyType,
+      features: slots.features,
+      isComplaint,
+      complaintSummary: null,
+      missingField: null,
+      nextQuestion: null,
+      userSummary: "",
+      shouldSearchProperties: matchedProperties.length > 0,
+    },
+    matchedProperties,
+    historyItems,
+    message,
+  );
 
   const response: { reply: string; properties?: MatchedPropertyResult[]; feedbackCreated?: boolean } = { reply };
   if (matchedProperties.length > 0) {

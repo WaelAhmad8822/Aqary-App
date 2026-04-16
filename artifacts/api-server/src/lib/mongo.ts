@@ -128,6 +128,27 @@ const pageViewSchema = new Schema(
   { versionKey: false },
 );
 
+const conversationStateSchema = new Schema(
+  {
+    id: { type: Number, required: true, unique: true, index: true },
+    userId: { type: Number, required: true, index: true },
+    sessionId: { type: String, required: true, index: true },
+    slots: {
+      role: { type: String, enum: ["buyer", "seller"], default: null },
+      payment: { type: String, enum: ["cash", "installment"], default: null },
+      budget: { type: Number, default: null },
+      location: { type: String, default: null },
+      propertyType: { type: String, default: null },
+      features: { type: [String], required: true, default: [] },
+    },
+    lastUserMessage: { type: String, default: "" },
+    updatedAt: { type: Date, required: true, default: Date.now, index: true },
+    createdAt: { type: Date, required: true, default: Date.now },
+  },
+  { versionKey: false },
+);
+conversationStateSchema.index({ userId: 1, sessionId: 1 }, { unique: true });
+
 export const CounterModel = model("Counter", counterSchema);
 export const UserModel = model("User", userSchema);
 export const PropertyModel = model("Property", propertySchema);
@@ -135,6 +156,7 @@ export const InteractionModel = model("Interaction", interactionSchema);
 export const FeedbackModel = model("Feedback", feedbackSchema);
 export const UserPreferenceModel = model("UserPreference", preferenceSchema);
 export const PageViewModel = model("PageView", pageViewSchema);
+export const ConversationStateModel = model("ConversationState", conversationStateSchema);
 
 export async function nextSequence(name: string): Promise<number> {
   const counter = await CounterModel.findOneAndUpdate(

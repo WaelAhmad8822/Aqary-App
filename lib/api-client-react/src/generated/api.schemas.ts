@@ -178,6 +178,8 @@ export interface ChatMatchedProperty {
   price: number;
   location: string;
   propertyType: string;
+  /** Relative frontend URL for property details */
+  propertyUrl: string;
   matchReasons: string[];
 }
 

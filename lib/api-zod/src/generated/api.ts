@@ -304,6 +304,9 @@ export const SendChatMessageResponse = zod.object({
         price: zod.number(),
         location: zod.string(),
         propertyType: zod.string(),
+        propertyUrl: zod
+          .string()
+          .describe("Relative frontend URL for property details"),
         matchReasons: zod.array(zod.string()),
       }),
     )

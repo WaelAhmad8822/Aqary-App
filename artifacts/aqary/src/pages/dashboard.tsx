@@ -6,18 +6,15 @@ import {
   useUpdateProperty,
   useDeleteProperty,
   getGetMyPropertiesQueryKey,
-  useGetSellerActivity,
-  getGetSellerActivityQueryKey,
 } from "@workspace/api-client-react";
 import type { CreatePropertyBody } from "@workspace/api-client-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, Plus, Home, Eye, Heart, Phone, TrendingUp, Pencil, Trash2, Activity } from "lucide-react";
+import { Loader2, Plus, Home, Eye, Heart, Phone, TrendingUp, Pencil, Trash2 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription } from "@/components/ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { useForm } from "react-hook-form";
@@ -25,16 +22,17 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { useQueryClient } from "@tanstack/react-query";
-import { format } from "date-fns";
 
-const interactionLabel = (t: string) =>
-  ({
-    view: "مشاهدة",
-    save: "حفظ",
-    contact: "تواصل",
-    scroll: "تمرير",
-    time_spent: "وقت في الصفحة",
-  })[t] ?? t;
+const AMENITY_OPTIONS = [
+  "موقف سيارات",
+  "مصعد",
+  "مسبح",
+  "أمن 24 ساعة",
+  "تكييف مركزي",
+  "مفروش",
+  "شرفة",
+  "حديقة",
+];
 
 const propertySchema = z.object({
   title: z.string().min(5, "العنوان يجب أن يكون 5 أحرف على الأقل"),
@@ -44,6 +42,7 @@ const propertySchema = z.object({
   area: z.coerce.number().min(1, "المساحة مطلوبة"),
   rooms: z.coerce.number().optional(),
   propertyType: z.enum(["apartment", "villa", "commercial", "land"]),
+  amenities: z.array(z.string()).optional(),
   imageUrl1: z.string().url("رابط الصورة الأولى غير صحيح").optional().or(z.literal("")),
   imageUrl2: z.string().url("رابط الصورة الثانية غير صحيح").optional().or(z.literal("")),
   imageUrl3: z.string().url("رابط الصورة الثالثة غير صحيح").optional().or(z.literal("")),
@@ -63,12 +62,6 @@ export default function Dashboard() {
     }
   });
 
-  const { data: sellerActivity, isLoading: activityLoading } = useGetSellerActivity({
-    query: {
-      queryKey: getGetSellerActivityQueryKey(),
-    },
-  });
-
   const createMutation = useCreateProperty();
   const updateMutation = useUpdateProperty();
   const deleteMutation = useDeleteProperty();
@@ -80,6 +73,7 @@ export default function Dashboard() {
       description: "",
       location: "",
       propertyType: "apartment",
+      amenities: [],
       imageUrl1: "",
       imageUrl2: "",
       imageUrl3: "",
@@ -95,6 +89,7 @@ export default function Dashboard() {
     area: number;
     rooms?: number | null;
     propertyType: string;
+    features?: string[];
     imageUrl?: string | null;
     imageUrls?: string[];
   }) => {
@@ -110,6 +105,7 @@ export default function Dashboard() {
       area: prop.area,
       rooms: prop.rooms ?? undefined,
       propertyType: prop.propertyType as "apartment" | "villa" | "commercial" | "land",
+      amenities: prop.features || [],
       imageUrl1: images[0] || "",
       imageUrl2: images[1] || "",
       imageUrl3: images[2] || "",
@@ -124,6 +120,7 @@ export default function Dashboard() {
       description: "",
       location: "",
       propertyType: "apartment",
+      amenities: [],
       imageUrl1: "",
       imageUrl2: "",
       imageUrl3: "",
@@ -140,6 +137,7 @@ export default function Dashboard() {
       .map((url) => (url || "").trim())
       .filter(Boolean)
       .slice(0, 3);
+    const features = (values.amenities || []).slice(0, 20);
     const payload = {
       title: values.title,
       description: values.description,
@@ -148,6 +146,7 @@ export default function Dashboard() {
       area: values.area,
       rooms: values.rooms,
       propertyType: values.propertyType,
+      features,
       imageUrl: imageUrls[0] || undefined,
       imageUrls,
     };
@@ -324,6 +323,46 @@ export default function Dashboard() {
 
                   <FormField
                     control={form.control}
+                    name="amenities"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>المرافق</FormLabel>
+                        <div className="grid grid-cols-2 gap-2">
+                          {AMENITY_OPTIONS.map((amenity) => {
+                            const checked = field.value?.includes(amenity);
+                            return (
+                              <label
+                                key={amenity}
+                                className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm cursor-pointer hover:bg-muted"
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="h-4 w-4"
+                                  checked={!!checked}
+                                  onChange={(e) => {
+                                    const value = field.value || [];
+                                    if (e.target.checked) {
+                                      field.onChange([...value, amenity]);
+                                    } else {
+                                      field.onChange(value.filter((v: string) => v !== amenity));
+                                    }
+                                  }}
+                                />
+                                <span>{amenity}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          اختر المرافق المتوفرة في العقار (يمكن اختيار أكثر من خيار).
+                        </p>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
                     name="imageUrl1"
                     render={({ field }) => (
                       <FormItem>
@@ -425,48 +464,6 @@ export default function Dashboard() {
             </CardContent>
           </Card>
         </div>
-
-        <Card className="mb-8 border-muted">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-lg flex items-center gap-2">
-              <Activity className="w-5 h-5 text-primary" />
-              آخر النشاط على إعلاناتك
-            </CardTitle>
-            <p className="text-sm text-muted-foreground font-normal">
-              مشاهدات، حفظ، وتواصل مسجّلة من المستخدمين (يُحدَّث عند زيارة هذه الصفحة)
-            </p>
-          </CardHeader>
-          <CardContent>
-            {activityLoading ? (
-              <div className="flex justify-center py-10"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>
-            ) : !sellerActivity?.recentInteractions?.length ? (
-              <p className="text-sm text-muted-foreground text-center py-8">لا يوجد نشاط بعد على عقاراتك.</p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>التاريخ</TableHead>
-                    <TableHead>العقار</TableHead>
-                    <TableHead>الإجراء</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {sellerActivity.recentInteractions.map((ev) => (
-                    <TableRow key={ev.id}>
-                      <TableCell className="whitespace-nowrap text-muted-foreground text-sm">
-                        {format(new Date(ev.createdAt), "yyyy/MM/dd HH:mm")}
-                      </TableCell>
-                      <TableCell className="font-medium max-w-[220px] truncate">{ev.propertyTitle || `#${ev.propertyId}`}</TableCell>
-                      <TableCell>
-                        <span className="text-sm">{interactionLabel(ev.interactionType)}</span>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
 
         <h2 className="text-2xl font-bold mb-4 border-b pb-2">عقاراتي</h2>
 

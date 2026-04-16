@@ -857,6 +857,9 @@ components:
           type: string
         propertyType:
           type: string
+        propertyUrl:
+          type: string
+          description: Relative frontend URL for property details
         matchReasons:
           type: array
           items:
@@ -867,6 +870,7 @@ components:
         - price
         - location
         - propertyType
+        - propertyUrl
         - matchReasons
 
     ChatResponse:
