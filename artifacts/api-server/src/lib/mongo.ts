@@ -1,24 +1,35 @@
-import mongoose, { Schema, model } from "mongoose";
+import mongoose, { Schema } from "mongoose";
 import { logger } from "./logger";
 
-const mongoUri = process.env.MONGODB_URI || process.env.DATABASE_URL;
+type MongooseCache = {
+  promise: Promise<typeof mongoose> | null;
+};
 
-let connectPromise: Promise<typeof mongoose> | null = null;
+const globalForMongoose = globalThis as unknown as {
+  __aqaryMongoose?: MongooseCache;
+};
 
-/**
- * Ensures MongoDB connection with connection pooling and retry logic.
- * Optimized for Vercel serverless functions.
- */
-export function ensureMongoConnection(): Promise<typeof mongoose> {
-  if (!mongoUri) {
-    return Promise.reject(
-      new Error("MONGODB_URI (or DATABASE_URL) must be set for database access."),
-    );
+const mongooseCache: MongooseCache =
+  globalForMongoose.__aqaryMongoose ?? { promise: null };
+
+globalForMongoose.__aqaryMongoose = mongooseCache;
+
+export async function ensureMongoConnection(): Promise<typeof mongoose> {
+  // In Vercel/serverless the module may be evaluated during bundling/build,
+  // so we must read env vars at runtime (inside the request).
+  const uri = process.env.MONGODB_URI || process.env.DATABASE_URL;
+  if (!uri) {
+    throw new Error("MONGODB_URI (or DATABASE_URL) must be set for database access.");
   }
 
-  if (!connectPromise) {
-    connectPromise = mongoose
-      .connect(mongoUri, {
+  // Reuse existing connection when the function instance is warm.
+  if (mongoose.connection.readyState === 1) {
+    return mongoose;
+  }
+
+  if (!mongooseCache.promise) {
+    mongooseCache.promise = mongoose
+      .connect(uri, {
         dbName: process.env.MONGODB_DB_NAME || "aqary",
         // Connection pool settings for serverless
         maxPoolSize: 10,
@@ -30,15 +41,14 @@ export function ensureMongoConnection(): Promise<typeof mongoose> {
         retryWrites: true,
         w: "majority",
       })
-      .catch((error) => {
-        // Reset the promise on connection failure to retry on next call
-        logger.error({ error }, "MongoDB connection failed, will retry on next attempt");
-        connectPromise = null;
-        throw error;
+      .catch((err) => {
+        logger.error({ err }, "MongoDB connection failed, will retry on next attempt");
+        mongooseCache.promise = null;
+        throw err;
       });
   }
 
-  return connectPromise;
+  return mongooseCache.promise;
 }
 
 const counterSchema = new Schema(
@@ -172,22 +182,34 @@ const conversationStateSchema = new Schema(
 );
 conversationStateSchema.index({ userId: 1, sessionId: 1 }, { unique: true });
 
-export const CounterModel = model("Counter", counterSchema);
-export const UserModel = model("User", userSchema);
-export const PropertyModel = model("Property", propertySchema);
-export const InteractionModel = model("Interaction", interactionSchema);
-export const FeedbackModel = model("Feedback", feedbackSchema);
-export const UserPreferenceModel = model("UserPreference", preferenceSchema);
-export const PageViewModel = model("PageView", pageViewSchema);
-export const ConversationStateModel = model("ConversationState", conversationStateSchema);
+export const CounterModel =
+  mongoose.models.Counter ?? mongoose.model("Counter", counterSchema);
+export const UserModel = mongoose.models.User ?? mongoose.model("User", userSchema);
+export const PropertyModel =
+  mongoose.models.Property ?? mongoose.model("Property", propertySchema);
+export const InteractionModel =
+  mongoose.models.Interaction ?? mongoose.model("Interaction", interactionSchema);
+export const FeedbackModel =
+  mongoose.models.Feedback ?? mongoose.model("Feedback", feedbackSchema);
+export const UserPreferenceModel =
+  mongoose.models.UserPreference ??
+  mongoose.model("UserPreference", preferenceSchema);
+export const PageViewModel =
+  mongoose.models.PageView ?? mongoose.model("PageView", pageViewSchema);
+export const ConversationStateModel =
+  mongoose.models.ConversationState ??
+  mongoose.model("ConversationState", conversationStateSchema);
 
 export async function nextSequence(name: string): Promise<number> {
   const counter = await CounterModel.findOneAndUpdate(
     { name },
     { $inc: { seq: 1 } },
     { new: true, upsert: true, setDefaultsOnInsert: true },
-  ).lean();
-  return counter!.seq;
+  ).lean<{ seq: number }>();
+  if (!counter) {
+    throw new Error(`Failed to allocate sequence for '${name}'`);
+  }
+  return counter.seq;
 }
 
 export function toDateISOString(value: Date): string {

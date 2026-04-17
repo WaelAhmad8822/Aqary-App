@@ -1,7 +1,7 @@
 import bcrypt from "bcryptjs";
 import mongoose, { Schema, model } from "mongoose";
 
-const mongoUri = process.env.MONGODB_URI || process.env.DATABASE_URL ||"mongodb+srv://waelalnaqiti_db_user:0jvPrGAEXYTA6UWk@cluster0.3lusbqq.mongodb.net/";
+const mongoUri = process.env.MONGODB_URI || process.env.DATABASE_URL;
 const dbName = process.env.MONGODB_DB_NAME || "aqary";
 
 if (!mongoUri) {

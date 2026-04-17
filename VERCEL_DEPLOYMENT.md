@@ -8,7 +8,7 @@ This project is now configured to deploy as a single Vercel project:
 
 Set these in your Vercel project settings:
 
-- `MONGODB_URI` - MongoDB connection string (required)
+- `MONGODB_URI` (or `DATABASE_URL`) - MongoDB connection string (required; MongoDB Atlas recommended)
 - `MONGODB_DB_NAME` - Database name (optional, defaults to `aqary`)
 - `JWT_SECRET` - JWT signing secret (required)
 - `NODE_ENV` - set to `production`
