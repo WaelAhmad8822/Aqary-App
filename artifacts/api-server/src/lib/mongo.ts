@@ -1,21 +1,43 @@
 import mongoose, { Schema, model } from "mongoose";
+import { logger } from "./logger";
 
 const mongoUri = process.env.MONGODB_URI || process.env.DATABASE_URL;
 
 let connectPromise: Promise<typeof mongoose> | null = null;
 
+/**
+ * Ensures MongoDB connection with connection pooling and retry logic.
+ * Optimized for Vercel serverless functions.
+ */
 export function ensureMongoConnection(): Promise<typeof mongoose> {
   if (!mongoUri) {
     return Promise.reject(
       new Error("MONGODB_URI (or DATABASE_URL) must be set for database access."),
     );
   }
-  const uri = mongoUri;
+
   if (!connectPromise) {
-    connectPromise = mongoose.connect(uri, {
-      dbName: process.env.MONGODB_DB_NAME || "aqary",
-    });
+    connectPromise = mongoose
+      .connect(mongoUri, {
+        dbName: process.env.MONGODB_DB_NAME || "aqary",
+        // Connection pool settings for serverless
+        maxPoolSize: 10,
+        minPoolSize: 2,
+        // Socket timeouts
+        socketTimeoutMS: 45000,
+        serverSelectionTimeoutMS: 5000,
+        // Retry configuration
+        retryWrites: true,
+        w: "majority",
+      })
+      .catch((error) => {
+        // Reset the promise on connection failure to retry on next call
+        logger.error({ error }, "MongoDB connection failed, will retry on next attempt");
+        connectPromise = null;
+        throw error;
+      });
   }
+
   return connectPromise;
 }
 
